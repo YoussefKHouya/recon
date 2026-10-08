@@ -3,7 +3,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
-VERSION="1.4.0"
+VERSION="1.4.1"
 PROFILE="passive"
 OUTPUT_ROOT="${HOME}/Recon"
 DOMAIN=""
@@ -111,11 +111,36 @@ print_command() {
   printf '%q ' "$@"
   printf '\n'
 }
+filter_live_log() {
+  local label="$1"
+  tr '\r' '\n' | awk -v label="$label" '
+    {
+      line=$0
+      gsub(/\033\[[0-9;]*[[:alpha:]]/, "", line)
+      if (line ~ /^[[:space:]]*$/) next
+      if (line ~ /[0-9]+[[:space:]]*\/[[:space:]]*[0-9]+/ && line ~ /%/) next
+      if (line ~ /p\/s/ && line ~ /%/) next
+      if (line ~ /\[[<>=_#*.-]+\]/ && line ~ /%/) next
+      if (line == previous) next
+      previous=line
+      printf "[%s] %s\n", label, line
+      fflush()
+    }
+  '
+}
+show_result_sample() {
+  local label="$1" file="$2"
+  [[ "$LIVE_OUTPUT" -eq 1 && -s "$file" ]] || return 0
+  case "$file" in
+    *.json|*.jsonl) info "$label: structured results=$file" ;;
+    *) awk -v label="$label" 'NF && length($0) <= 240 {printf "[%s] result: %s\n", label, $0; shown++; if (shown == 5) exit}' "$file" ;;
+  esac
+}
 run_logged() {
-  local stdout_log="$1" stderr_log="$2"; shift 2
+  local label="$1" stdout_log="$2" stderr_log="$3"; shift 3
   local rc
   if [[ "$LIVE_OUTPUT" -eq 1 ]]; then
-    run_with_limit "$@" > >(tee "$stdout_log") 2> >(tee "$stderr_log" >&2)
+    run_with_limit "$@" > >(tee "$stdout_log" | filter_live_log "$label") 2> >(tee "$stderr_log" | filter_live_log "$label" >&2)
     rc=$?
     wait 2>/dev/null || true
   else
@@ -317,7 +342,7 @@ run_capture() {
   local rc
   set +e
   if [[ "$LIVE_OUTPUT" -eq 1 ]]; then
-    run_with_limit "$@" >"$outfile.tmp" 2> >(tee "$errlog" >&2)
+    run_with_limit "$@" >"$outfile.tmp" 2> >(tee "$errlog" | filter_live_log "$label" >&2)
     rc=$?
     wait 2>/dev/null || true
   else
@@ -332,6 +357,7 @@ run_capture() {
     elapsed=$(( $(date +%s) - started ))
     items="$(count_items "$outfile")"
     info "$label: completed items=$items duration=${elapsed}s"
+    show_result_sample "$label" "$outfile"
   else
     redact_log_file "$errlog"
     rm -f "$outfile.tmp"
@@ -447,7 +473,7 @@ run_oneforall() {
   rm -f "$tmp"
   set +e
   if [[ "$LIVE_OUTPUT" -eq 1 ]]; then
-    (cd "$home_dir" && run_with_limit "${cmd[@]}") > >(tee "$stdout_log") 2> >(tee "$stderr_log" >&2)
+    (cd "$home_dir" && run_with_limit "${cmd[@]}") > >(tee "$stdout_log" | filter_live_log oneforall) 2> >(tee "$stderr_log" | filter_live_log oneforall >&2)
     local rc=$?
     wait 2>/dev/null || true
   else
@@ -484,6 +510,7 @@ PY
     mv "$tmp" "$outfile"
     elapsed=$(( $(date +%s) - stage_started ))
     info "oneforall: completed items=$(count_items "$outfile") duration=${elapsed}s"
+    show_result_sample oneforall "$outfile"
   else
     rm -f "$tmp"
     elapsed=$(( $(date +%s) - stage_started ))
@@ -528,7 +555,7 @@ run_karma() {
   stage_started="$(date +%s)"
   info "karma: started mode=$KARMA_MODE"
   print_command karma "${exec_cmd[@]}"
-  if run_logged "$stdout_log" "$stderr_log" "${exec_cmd[@]}"; then
+  if run_logged karma "$stdout_log" "$stderr_log" "${exec_cmd[@]}"; then
     redact_log_file "$stdout_log"
     redact_log_file "$stderr_log"
     if [[ -f "$tmp_out/hosts.txt" ]]; then
@@ -538,6 +565,7 @@ run_karma() {
         mv "${raw_out}.tmp.$$" "$raw_out"
         elapsed=$(( $(date +%s) - stage_started ))
         info "karma: completed hosts=$(count_items "$raw_out") duration=${elapsed}s"
+        show_result_sample karma "$raw_out"
       else
         rm -rf "$tmp_out"
         warn "Karma output publication failed; previous artifact preserved"
@@ -598,7 +626,7 @@ run_cloud() {
     info "kaeferjaeger: started"
     print_command kaeferjaeger "${origin_exec_cmd[@]}"
     set +e
-    run_logged "$base/logs/kaeferjaeger.stdout.log" "$base/logs/kaeferjaeger.stderr.log" "${origin_exec_cmd[@]}"
+    run_logged kaeferjaeger "$base/logs/kaeferjaeger.stdout.log" "$base/logs/kaeferjaeger.stderr.log" "${origin_exec_cmd[@]}"
     local origin_rc=$?
     set -e
     redact_log_file "$base/logs/kaeferjaeger.stdout.log"
@@ -608,6 +636,7 @@ run_cloud() {
       mv "$origin_tmp" "$kaefer_out/sni-associations.txt"
       origin_ok=1
       info "kaeferjaeger: completed items=$(count_items "$kaefer_out/sni-associations.txt") duration=$(( $(date +%s) - origin_started ))s"
+      show_result_sample kaeferjaeger "$kaefer_out/sni-associations.txt"
     else
       rm -f "$origin_tmp"
       warn "Kaeferjaeger failed (exit $origin_rc); see $base/logs/kaeferjaeger.stderr.log"
@@ -623,7 +652,7 @@ run_cloud() {
     local bbot_started="$(date +%s)"
     info "bbot-cloud: started"
     print_command bbot-cloud "${bbot_exec_cmd[@]}"
-    if run_logged "$base/logs/bbot-cloud.stdout.log" "$base/logs/bbot-cloud.stderr.log" "${bbot_exec_cmd[@]}" && [[ -d "$bbot_tmp" ]]; then
+    if run_logged bbot-cloud "$base/logs/bbot-cloud.stdout.log" "$base/logs/bbot-cloud.stderr.log" "${bbot_exec_cmd[@]}" && [[ -d "$bbot_tmp" ]]; then
       if atomic_publish_dir "$bbot_tmp" "$bbot_out"; then
         rm -rf "$bbot_tmp"
         bbot_ok=1
@@ -716,7 +745,7 @@ run_domain() {
       rm -rf "$osm_target"
       info "osmedeus: started"
       print_command osmedeus "${osm_cmd[@]}"
-      if run_logged "$base/logs/osmedeus.stdout.log" "$base/logs/osmedeus.stderr.log" "${osm_cmd[@]}"; then
+      if run_logged osmedeus "$base/logs/osmedeus.stdout.log" "$base/logs/osmedeus.stderr.log" "${osm_cmd[@]}"; then
         info "osmedeus: command completed"
       else
         warn "osmedeus: command failed; log=$base/logs/osmedeus.stderr.log"
@@ -728,6 +757,8 @@ run_domain() {
       if [[ -f "$osm_file" ]]; then
         cp "$osm_file" "$raw/osmedeus.txt.tmp"
         mv "$raw/osmedeus.txt.tmp" "$raw/osmedeus.txt"
+        info "osmedeus: results=$(count_items "$raw/osmedeus.txt")"
+        show_result_sample osmedeus "$raw/osmedeus.txt"
       else
         [[ -e "$raw/osmedeus.txt" ]] || : > "$raw/osmedeus.txt"
       fi

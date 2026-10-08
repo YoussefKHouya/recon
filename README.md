@@ -163,7 +163,7 @@ The default terminal output reports:
 - final totals for subdomains, resolved hosts, web services, URLs, ports, and Nuclei leads;
 - per-source subdomain counts and paths to the complete logs and machine-readable summary.
 
-Tool output is live by default. Progress and diagnostic output from core tools is streamed to the terminal while still being written to its log file. Osmedeus, Karma, BBOT, Kaeferjaeger, and OneForAll stream both their normal output and errors. Every executed command is printed with a `[>]` prefix.
+Tool output is live by default, but progress bars, counters, spinners, and duplicate status lines are filtered from the terminal. The unfiltered output remains in the stage log files. Useful diagnostics from core tools are shown as they happen; Osmedeus, Karma, BBOT, Kaeferjaeger, and OneForAll stream meaningful normal output and errors. Every executed command is printed with a `[>]` prefix. Completed text-producing stages show the result count, result path, and up to five sample findings instead of dumping thousands of lines.
 
 For summary-only output:
 
