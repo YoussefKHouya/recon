@@ -12,6 +12,7 @@ A bounded, provenance-preserving reconnaissance pipeline for authorized bug-boun
 - Unified HTTP rate control with a hard maximum of 10 requests per second per stage
 - Raw and normalized output retained per tool
 - Resume-safe and atomic artifact publication
+- Unlimited stage runtime by default; optional operator-defined deadline
 - Automatic BBOT and Kaeferjaeger cloud discovery in `standard` and `deep`
 - Optional OneForAll, Osmedeus, Karma, and ReconCompare integration
 - Narrow port discovery and targeted Nuclei validation in `deep`
@@ -25,7 +26,7 @@ The script uses available tools and skips missing optional components. Install t
 
 - Bash 4+
 - Python 3
-- GNU `timeout`
+- GNU `timeout` only when `--max-time` is used
 - Subfinder
 - GAU
 
@@ -134,6 +135,24 @@ Display every option:
 ```
 
 The limit applies independently to each stage, not as a shared host-wide aggregate. Naabu uses the separate `--port-rate` packet limit.
+
+## Runtime
+
+Stages have no wall-clock deadline by default. Slow collectors such as Amass, BBOT, Karma, and Osmedeus may run until they complete.
+
+Set an explicit deadline only when you want one:
+
+```bash
+./recon.sh --domain example.com --profile deep --ack-scope --max-time 120
+```
+
+`--max-time 0` means unlimited and is the default. Accepted bounded values are 1 through 1440 minutes. Per-request network timeouts remain enabled so one dead connection cannot stall a scanner forever.
+
+To watch the current run's logs from another terminal:
+
+```bash
+tail -n 30 -F ~/Recon/example.com/logs/*.log
+```
 
 ## Output
 

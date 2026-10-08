@@ -3,7 +3,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
-VERSION="1.2.2"
+VERSION="1.3.0"
 PROFILE="passive"
 OUTPUT_ROOT="${HOME}/Recon"
 DOMAIN=""
@@ -31,7 +31,7 @@ PORT_RATE=100
 NUCLEI_RATE=""
 CLOUD_RATE=""
 KAEFERJAEGER_DIR="${KAEFERJAEGER_DIR:-${HOME}/kaeferjaeger.gay}"
-MAX_TIME_MIN=10
+MAX_TIME_MIN=0
 
 usage() {
   cat <<'EOF'
@@ -73,7 +73,7 @@ BOUNDS
       --crawl-rate N        Override --rate for Katana
       --port-rate N         Naabu packets/sec, max 1000 (default: 100)
       --nuclei-rate N       Override --rate for Nuclei
-      --max-time N          Tool maximum minutes, max 60 (default: 10)
+      --max-time N          Optional stage limit in minutes; 0 = unlimited (default: 0)
 
 OUTPUT
   Recon/<domain>/outputs/ under the selected output root.
@@ -94,6 +94,14 @@ die() { printf '[!] %s\n' "$*" >&2; exit 1; }
 warn() { printf '[~] %s\n' "$*" >&2; }
 info() { printf '[+] %s\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+run_with_limit() {
+  if [[ "$MAX_TIME_MIN" -eq 0 ]]; then
+    "$@"
+  else
+    timeout --signal=TERM --kill-after=30s "$((MAX_TIME_MIN * 60))" "$@"
+  fi
+}
 
 need_value() {
   [[ $# -ge 2 && -n "${2:-}" ]] || die "Missing value for $1"
@@ -152,13 +160,13 @@ fi
 if [[ ( "$ENABLE_ONEFORALL" -eq 1 || "$ENABLE_OSMEDEUS" -eq 1 ) && "$ACK_SCOPE" -ne 1 ]]; then
   die "OneForAll and Osmedeus require --ack-scope"
 fi
-for n in "$RATE" "$HTTP_RATE" "$CRAWL_RATE" "$PORT_RATE" "$NUCLEI_RATE" "$CLOUD_RATE" "$MAX_TIME_MIN" "$KARMA_LIMIT" "$KARMA_ACTIVE_RATE" "$KARMA_MAX_TARGETS"; do
+for n in "$RATE" "$HTTP_RATE" "$CRAWL_RATE" "$PORT_RATE" "$NUCLEI_RATE" "$CLOUD_RATE" "$KARMA_LIMIT" "$KARMA_ACTIVE_RATE" "$KARMA_MAX_TARGETS"; do
   [[ "$n" =~ ^[1-9][0-9]*$ ]] || die "Rate/time values must be positive integers"
 done
 for n in "$RATE" "$HTTP_RATE" "$CRAWL_RATE" "$NUCLEI_RATE" "$CLOUD_RATE" "$KARMA_ACTIVE_RATE"; do
   [[ "$n" =~ ^([1-9]|10)$ ]] || die "HTTP request rates must be integers from 1 through 10"
 done
-[[ "$MAX_TIME_MIN" =~ ^([1-9]|[1-5][0-9]|60)$ ]] || die "--max-time must be an integer from 1 through 60"
+[[ "$MAX_TIME_MIN" =~ ^(0|[1-9][0-9]{0,3})$ ]] && (( MAX_TIME_MIN <= 1440 )) || die "--max-time must be 0 (unlimited) or 1 through 1440 minutes"
 [[ "$PORT_RATE" =~ ^([1-9]|[1-9][0-9]|[1-9][0-9]{2}|1000)$ ]] || die "--port-rate must be an integer from 1 through 1000"
 [[ "$KARMA_LIMIT" =~ ^([1-9]|[1-9][0-9]|100)$ ]] || die "--karma-limit must be an integer from 1 through 100"
 [[ "$KARMA_MAX_TARGETS" =~ ^([1-9]|[1-9][0-9]|[1-4][0-9]{2}|500)$ ]] || die "--karma-max-targets must be an integer from 1 through 500"
@@ -265,7 +273,7 @@ run_capture() {
   if [[ "$RESUME" -eq 1 && -s "$outfile" ]]; then info "$label: resume skip"; return 0; fi
   if [[ "$DRY_RUN" -eq 1 ]]; then : > "$outfile"; return 0; fi
   info "$label"
-  if timeout --signal=TERM --kill-after=15s "$((MAX_TIME_MIN * 60))" "$@" >"$outfile.tmp" 2>"$errlog"; then
+  if run_with_limit "$@" >"$outfile.tmp" 2>"$errlog"; then
     redact_log_file "$outfile.tmp"
     redact_log_file "$errlog"
     mv "$outfile.tmp" "$outfile"
@@ -378,7 +386,7 @@ run_oneforall() {
   started="$(date +%s)"
   rm -f "$tmp"
   set +e
-  (cd "$home_dir" && timeout --signal=TERM --kill-after=15s "$((MAX_TIME_MIN * 60))" "${cmd[@]}") >"$stdout_log" 2>"$stderr_log"
+  (cd "$home_dir" && run_with_limit "${cmd[@]}") >"$stdout_log" 2>"$stderr_log"
   local rc=$?
   set -e
   redact_log_file "$stdout_log"
@@ -445,7 +453,7 @@ run_karma() {
   [[ -n "$KARMA_CVE_ID" ]] && exec_cmd+=(--cve-id "$KARMA_CVE_ID")
   [[ "$ACK_SCOPE" -eq 1 ]] && exec_cmd+=(--ack-scope)
   rm -rf "$tmp_out"
-  if timeout --signal=TERM --kill-after=15s "$((MAX_TIME_MIN * 60 + 60))" "${exec_cmd[@]}" >"$stdout_log" 2>"$stderr_log"; then
+  if run_with_limit "${exec_cmd[@]}" >"$stdout_log" 2>"$stderr_log"; then
     redact_log_file "$stdout_log"
     redact_log_file "$stderr_log"
     if [[ -f "$tmp_out/hosts.txt" ]]; then
@@ -507,7 +515,7 @@ run_cloud() {
 
   if [[ -f "$origin_script" ]]; then
     set +e
-    timeout --signal=TERM --kill-after=15s "$((MAX_TIME_MIN * 60))" "${origin_exec_cmd[@]}" >"$base/logs/kaeferjaeger.stdout.log" 2>"$base/logs/kaeferjaeger.stderr.log"
+    run_with_limit "${origin_exec_cmd[@]}" >"$base/logs/kaeferjaeger.stdout.log" 2>"$base/logs/kaeferjaeger.stderr.log"
     local origin_rc=$?
     set -e
     redact_log_file "$base/logs/kaeferjaeger.stdout.log"
@@ -527,7 +535,7 @@ run_cloud() {
   fi
 
   if have bbot; then
-    if timeout --signal=TERM --kill-after=30s "$((MAX_TIME_MIN * 60))" "${bbot_exec_cmd[@]}" >"$base/logs/bbot-cloud.stdout.log" 2>"$base/logs/bbot-cloud.stderr.log" && [[ -d "$bbot_tmp" ]]; then
+    if run_with_limit "${bbot_exec_cmd[@]}" >"$base/logs/bbot-cloud.stdout.log" 2>"$base/logs/bbot-cloud.stderr.log" && [[ -d "$bbot_tmp" ]]; then
       if atomic_publish_dir "$bbot_tmp" "$bbot_out"; then
         rm -rf "$bbot_tmp"
         bbot_ok=1
@@ -579,11 +587,17 @@ run_domain() {
   printf '{"domain":"%s","profile":"%s","dry_run":%s,"ack_scope":%s}\n' "$domain" "$PROFILE" "$DRY_RUN" "$ACK_SCOPE" > "$base/logs/run.json"
 
   if have subfinder || [[ "$DRY_RUN" -eq 1 ]]; then
-    run_capture "$base" subfinder "$raw/subfinder.txt" subfinder -d "$domain" -silent -duc -rl 10 -max-time "$MAX_TIME_MIN"
+    local subfinder_cmd=(subfinder -d "$domain" -silent -duc -rl 10)
+    [[ "$MAX_TIME_MIN" -gt 0 ]] && subfinder_cmd+=(-max-time "$MAX_TIME_MIN")
+    run_capture "$base" subfinder "$raw/subfinder.txt" "${subfinder_cmd[@]}"
   else warn "subfinder missing"; fi
   if have assetfinder; then run_capture "$base" assetfinder "$raw/assetfinder.txt" assetfinder --subs-only "$domain"; fi
   if have findomain; then run_capture "$base" findomain "$raw/findomain.txt" findomain -t "$domain" -q; fi
-  if have amass && [[ "$PROFILE" == deep ]]; then run_capture "$base" amass "$raw/amass.txt" amass enum -passive -d "$domain" -timeout "$MAX_TIME_MIN"; fi
+  if have amass && [[ "$PROFILE" == deep ]]; then
+    local amass_cmd=(amass enum -passive -d "$domain")
+    [[ "$MAX_TIME_MIN" -gt 0 ]] && amass_cmd+=(-timeout "$MAX_TIME_MIN")
+    run_capture "$base" amass "$raw/amass.txt" "${amass_cmd[@]}"
+  fi
   if have chaos && [[ -n "${PDCP_API_KEY:-}" ]]; then run_capture "$base" chaos "$raw/chaos.txt" chaos -d "$domain" -silent; fi
   if [[ "$ENABLE_ONEFORALL" -eq 1 ]]; then run_oneforall "$domain" "$base" "$raw/oneforall.txt"; fi
   if [[ "$ENABLE_KARMA" -eq 1 ]]; then run_karma "$domain" "$base" "$out/karma" "$raw/karma.txt"; fi
@@ -594,14 +608,16 @@ run_domain() {
 
   if [[ "$ENABLE_OSMEDEUS" -eq 1 ]]; then
     local osm_target="$out/osmedeus/workspace"
-    record_cmd "$base/logs/commands.log" osmedeus run -m subdomain-enum -t "$domain" -S "$domain" -W "$out/osmedeus" -w workspace -B gently --timeout 1h
+    local osm_cmd=(osmedeus run -m subdomain-enum -t "$domain" -S "$domain" -W "$out/osmedeus" -w workspace -B gently)
+    [[ "$MAX_TIME_MIN" -gt 0 ]] && osm_cmd+=(--timeout "${MAX_TIME_MIN}m")
+    record_cmd "$base/logs/commands.log" "${osm_cmd[@]}"
     if [[ "$RESUME" -eq 1 && -s "$raw/osmedeus.txt" ]]; then
       info "osmedeus: resume skip"
     elif [[ "$DRY_RUN" -eq 1 ]]; then
       : > "$raw/osmedeus.txt"
     elif have osmedeus; then
       rm -rf "$osm_target"
-      timeout --signal=TERM --kill-after=30s 3600 osmedeus run -m subdomain-enum -t "$domain" -S "$domain" -W "$out/osmedeus" -w workspace -B gently --timeout 1h >"$base/logs/osmedeus.stdout.log" 2>"$base/logs/osmedeus.stderr.log" || true
+      run_with_limit "${osm_cmd[@]}" >"$base/logs/osmedeus.stdout.log" 2>"$base/logs/osmedeus.stderr.log" || true
       redact_log_file "$base/logs/osmedeus.stdout.log"
       redact_log_file "$base/logs/osmedeus.stderr.log"
       local osm_file="$out/osmedeus/$domain/subdomain/subdomain-$domain.txt"
