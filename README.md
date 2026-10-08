@@ -154,6 +154,23 @@ To watch the current run's logs from another terminal:
 tail -n 30 -F ~/Recon/example.com/logs/*.log
 ```
 
+The default terminal output reports:
+
+- target, profile, effective rate, runtime policy, and output path;
+- when each stage starts, completes, fails, or is skipped by `--resume`;
+- stage duration and number of emitted items;
+- a short stderr excerpt when a stage fails;
+- final totals for subdomains, resolved hosts, web services, URLs, ports, and Nuclei leads;
+- per-source subdomain counts and paths to the complete logs and machine-readable summary.
+
+Tool output is live by default. Progress and diagnostic output from core tools is streamed to the terminal while still being written to its log file. Osmedeus, Karma, BBOT, Kaeferjaeger, and OneForAll stream both their normal output and errors. Every executed command is printed with a `[>]` prefix.
+
+For summary-only output:
+
+```bash
+./recon.sh --domain example.com --quiet
+```
+
 ## Output
 
 ```text

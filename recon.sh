@@ -3,7 +3,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
-VERSION="1.3.0"
+VERSION="1.4.0"
 PROFILE="passive"
 OUTPUT_ROOT="${HOME}/Recon"
 DOMAIN=""
@@ -11,6 +11,7 @@ LIST_FILE=""
 ACK_SCOPE=0
 DRY_RUN=0
 RESUME=0
+LIVE_OUTPUT=1
 ENABLE_COMPARE=0
 ENABLE_OSMEDEUS=0
 ENABLE_ONEFORALL=0
@@ -50,6 +51,7 @@ EXECUTION
       --ack-scope           Confirm active probing is permitted for every input
       --resume              Preserve completed/raw artifacts and rerun missing stages
       --dry-run             Create layout and command log without network execution
+      --quiet               Hide tool output; keep stage summaries and log files
       --output-root DIR     Root directory (default: ~/Recon)
 
 OPTIONAL MODULES
@@ -94,6 +96,34 @@ die() { printf '[!] %s\n' "$*" >&2; exit 1; }
 warn() { printf '[~] %s\n' "$*" >&2; }
 info() { printf '[+] %s\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
+count_items() { [[ -f "$1" ]] && awk 'NF {n++} END {print n+0}' "$1" || printf '0\n'; }
+show_log_excerpt() {
+  local file="$1"
+  [[ -s "$file" ]] || return 0
+  printf '%s\n' "--- last log lines: $file ---" >&2
+  tr '\r' '\n' < "$file" | awk 'NF' | tail -n 12 >&2
+  printf '%s\n' '--- end log excerpt ---' >&2
+}
+print_command() {
+  local label="$1"; shift
+  [[ "$LIVE_OUTPUT" -eq 1 ]] || return 0
+  printf '[>] %s: ' "$label"
+  printf '%q ' "$@"
+  printf '\n'
+}
+run_logged() {
+  local stdout_log="$1" stderr_log="$2"; shift 2
+  local rc
+  if [[ "$LIVE_OUTPUT" -eq 1 ]]; then
+    run_with_limit "$@" > >(tee "$stdout_log") 2> >(tee "$stderr_log" >&2)
+    rc=$?
+    wait 2>/dev/null || true
+  else
+    run_with_limit "$@" >"$stdout_log" 2>"$stderr_log"
+    rc=$?
+  fi
+  return "$rc"
+}
 
 run_with_limit() {
   if [[ "$MAX_TIME_MIN" -eq 0 ]]; then
@@ -124,6 +154,7 @@ while [[ $# -gt 0 ]]; do
     --ack-scope) ACK_SCOPE=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --resume) RESUME=1; shift ;;
+    --quiet) LIVE_OUTPUT=0; shift ;;
     --compare) ENABLE_COMPARE=1; shift ;;
     --osmedeus) ENABLE_OSMEDEUS=1; shift ;;
     --oneforall) ENABLE_ONEFORALL=1; shift ;;
@@ -269,19 +300,44 @@ PY
 run_capture() {
   local domain_dir="$1" label="$2" outfile="$3"; shift 3
   local cmdlog="$domain_dir/logs/commands.log" errlog="$domain_dir/logs/${label}.stderr.log"
+  local started elapsed items
   record_cmd "$cmdlog" "$@"
-  if [[ "$RESUME" -eq 1 && -s "$outfile" ]]; then info "$label: resume skip"; return 0; fi
-  if [[ "$DRY_RUN" -eq 1 ]]; then : > "$outfile"; return 0; fi
-  info "$label"
-  if run_with_limit "$@" >"$outfile.tmp" 2>"$errlog"; then
+  if [[ "$RESUME" -eq 1 && -s "$outfile" ]]; then
+    info "$label: resume skip items=$(count_items "$outfile")"
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    : > "$outfile"
+    info "$label: planned"
+    return 0
+  fi
+  started="$(date +%s)"
+  info "$label: started"
+  print_command "$label" "$@"
+  local rc
+  set +e
+  if [[ "$LIVE_OUTPUT" -eq 1 ]]; then
+    run_with_limit "$@" >"$outfile.tmp" 2> >(tee "$errlog" >&2)
+    rc=$?
+    wait 2>/dev/null || true
+  else
+    run_with_limit "$@" >"$outfile.tmp" 2>"$errlog"
+    rc=$?
+  fi
+  set -e
+  if [[ "$rc" -eq 0 ]]; then
     redact_log_file "$outfile.tmp"
     redact_log_file "$errlog"
     mv "$outfile.tmp" "$outfile"
+    elapsed=$(( $(date +%s) - started ))
+    items="$(count_items "$outfile")"
+    info "$label: completed items=$items duration=${elapsed}s"
   else
-    local rc=$?
     redact_log_file "$errlog"
     rm -f "$outfile.tmp"
-    warn "$label failed (exit $rc); see $errlog"
+    elapsed=$(( $(date +%s) - started ))
+    warn "$label: failed exit=$rc duration=${elapsed}s log=$errlog"
+    show_log_excerpt "$errlog"
     [[ -e "$outfile" ]] || : > "$outfile"
     return 0
   fi
@@ -376,18 +432,28 @@ run_oneforall() {
   local home_dir="${ONEFORALL_HOME:-$HOME/tools/OneForAll}"
   local python="$home_dir/.venv/bin/python"
   local stdout_log="$domain_dir/logs/oneforall.stdout.log" stderr_log="$domain_dir/logs/oneforall.stderr.log"
+  local stage_started elapsed
   [[ -x "$python" ]] || python="${PYTHON_BIN:-python3}"
   local cmd=("$python" oneforall.py --target "$domain" --brute False --dns False --req False --takeover False --fmt csv run)
   record_cmd "$cmdlog" bash -c "cd <ONEFORALL_HOME> && ${cmd[*]}"
-  if [[ "$RESUME" -eq 1 && -s "$outfile" ]]; then info "oneforall: resume skip"; return; fi
-  if [[ "$DRY_RUN" -eq 1 ]]; then : > "$outfile"; return; fi
+  if [[ "$RESUME" -eq 1 && -s "$outfile" ]]; then info "oneforall: resume skip items=$(count_items "$outfile")"; return; fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then : > "$outfile"; info "oneforall: planned"; return; fi
   if [[ ! -f "$home_dir/oneforall.py" ]]; then warn "OneForAll missing: $home_dir"; [[ -e "$outfile" ]] || : > "$outfile"; return; fi
   local tmp="${outfile}.tmp.$$" started
   started="$(date +%s)"
+  stage_started="$started"
+  info "oneforall: started"
+  print_command oneforall bash -c "cd <ONEFORALL_HOME> && ${cmd[*]}"
   rm -f "$tmp"
   set +e
-  (cd "$home_dir" && run_with_limit "${cmd[@]}") >"$stdout_log" 2>"$stderr_log"
-  local rc=$?
+  if [[ "$LIVE_OUTPUT" -eq 1 ]]; then
+    (cd "$home_dir" && run_with_limit "${cmd[@]}") > >(tee "$stdout_log") 2> >(tee "$stderr_log" >&2)
+    local rc=$?
+    wait 2>/dev/null || true
+  else
+    (cd "$home_dir" && run_with_limit "${cmd[@]}") >"$stdout_log" 2>"$stderr_log"
+    local rc=$?
+  fi
   set -e
   redact_log_file "$stdout_log"
   redact_log_file "$stderr_log"
@@ -416,9 +482,13 @@ for path in base.rglob("*.csv"):
 out.write_text("".join(value + "\n" for value in sorted(values)), encoding="utf-8")
 PY
     mv "$tmp" "$outfile"
+    elapsed=$(( $(date +%s) - stage_started ))
+    info "oneforall: completed items=$(count_items "$outfile") duration=${elapsed}s"
   else
     rm -f "$tmp"
-    warn "OneForAll failed; see $stderr_log"
+    elapsed=$(( $(date +%s) - stage_started ))
+    warn "oneforall: failed exit=$rc duration=${elapsed}s log=$stderr_log"
+    show_log_excerpt "$stderr_log"
     [[ -e "$outfile" ]] || : > "$outfile"
   fi
 }
@@ -431,15 +501,17 @@ run_karma() {
   local cmdlog="$domain_dir/logs/commands.log"
   local wrapper="${KARMA_WRAPPER:-karma-v2-safe}"
   local stdout_log="$domain_dir/logs/karma.stdout.log" stderr_log="$domain_dir/logs/karma.stderr.log"
+  local stage_started elapsed
   local cmd=("$wrapper" --domain "$domain" --output "$karma_out" --mode "$KARMA_MODE" --limit "$KARMA_LIMIT" --token-file "$KARMA_TOKEN_FILE" --active-rate "$KARMA_ACTIVE_RATE" --max-targets "$KARMA_MAX_TARGETS" --max-minutes "$MAX_TIME_MIN")
   [[ -n "$KARMA_CVE_ID" ]] && cmd+=(--cve-id "$KARMA_CVE_ID")
   [[ "$ACK_SCOPE" -eq 1 ]] && cmd+=(--ack-scope)
   record_cmd "$cmdlog" "${cmd[@]}"
-  if [[ "$RESUME" -eq 1 && -s "$raw_out" && -s "$karma_out/hosts.txt" ]]; then info "karma: resume skip"; return; fi
+  if [[ "$RESUME" -eq 1 && -s "$raw_out" && -s "$karma_out/hosts.txt" ]]; then info "karma: resume skip items=$(count_items "$raw_out")"; return; fi
   if [[ "$DRY_RUN" -eq 1 ]]; then
     mkdir -p "$karma_out"
     : > "$karma_out/hosts.txt"
     : > "$raw_out"
+    info "karma: planned mode=$KARMA_MODE"
     return
   fi
   if ! have "$wrapper"; then
@@ -453,7 +525,10 @@ run_karma() {
   [[ -n "$KARMA_CVE_ID" ]] && exec_cmd+=(--cve-id "$KARMA_CVE_ID")
   [[ "$ACK_SCOPE" -eq 1 ]] && exec_cmd+=(--ack-scope)
   rm -rf "$tmp_out"
-  if run_with_limit "${exec_cmd[@]}" >"$stdout_log" 2>"$stderr_log"; then
+  stage_started="$(date +%s)"
+  info "karma: started mode=$KARMA_MODE"
+  print_command karma "${exec_cmd[@]}"
+  if run_logged "$stdout_log" "$stderr_log" "${exec_cmd[@]}"; then
     redact_log_file "$stdout_log"
     redact_log_file "$stderr_log"
     if [[ -f "$tmp_out/hosts.txt" ]]; then
@@ -461,6 +536,8 @@ run_karma() {
         rm -rf "$tmp_out"
         cp "$karma_out/hosts.txt" "${raw_out}.tmp.$$"
         mv "${raw_out}.tmp.$$" "$raw_out"
+        elapsed=$(( $(date +%s) - stage_started ))
+        info "karma: completed hosts=$(count_items "$raw_out") duration=${elapsed}s"
       else
         rm -rf "$tmp_out"
         warn "Karma output publication failed; previous artifact preserved"
@@ -469,6 +546,7 @@ run_karma() {
     else
       rm -rf "$tmp_out"
       warn "Karma completed without hosts.txt"
+      show_log_excerpt "$stderr_log"
       [[ -e "$raw_out" ]] || : > "$raw_out"
     fi
   else
@@ -476,6 +554,7 @@ run_karma() {
     redact_log_file "$stderr_log"
     rm -rf "$tmp_out"
     warn "Karma mode '$KARMA_MODE' did not complete; see $stderr_log"
+    show_log_excerpt "$stderr_log"
     [[ -e "$raw_out" ]] || : > "$raw_out"
   fi
 }
@@ -507,6 +586,7 @@ run_cloud() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     : > "$kaefer_out/sni-associations.txt"
     : > "$cloud/summary.json"
+    info "cloud: planned Kaeferjaeger + BBOT"
     return
   fi
 
@@ -514,8 +594,11 @@ run_cloud() {
   rm -rf "$bbot_tmp"
 
   if [[ -f "$origin_script" ]]; then
+    local origin_started="$(date +%s)"
+    info "kaeferjaeger: started"
+    print_command kaeferjaeger "${origin_exec_cmd[@]}"
     set +e
-    run_with_limit "${origin_exec_cmd[@]}" >"$base/logs/kaeferjaeger.stdout.log" 2>"$base/logs/kaeferjaeger.stderr.log"
+    run_logged "$base/logs/kaeferjaeger.stdout.log" "$base/logs/kaeferjaeger.stderr.log" "${origin_exec_cmd[@]}"
     local origin_rc=$?
     set -e
     redact_log_file "$base/logs/kaeferjaeger.stdout.log"
@@ -524,9 +607,11 @@ run_cloud() {
       redact_log_file "$origin_tmp"
       mv "$origin_tmp" "$kaefer_out/sni-associations.txt"
       origin_ok=1
+      info "kaeferjaeger: completed items=$(count_items "$kaefer_out/sni-associations.txt") duration=$(( $(date +%s) - origin_started ))s"
     else
       rm -f "$origin_tmp"
       warn "Kaeferjaeger failed (exit $origin_rc); see $base/logs/kaeferjaeger.stderr.log"
+      show_log_excerpt "$base/logs/kaeferjaeger.stderr.log"
       [[ -e "$kaefer_out/sni-associations.txt" ]] || : > "$kaefer_out/sni-associations.txt"
     fi
   else
@@ -535,10 +620,14 @@ run_cloud() {
   fi
 
   if have bbot; then
-    if run_with_limit "${bbot_exec_cmd[@]}" >"$base/logs/bbot-cloud.stdout.log" 2>"$base/logs/bbot-cloud.stderr.log" && [[ -d "$bbot_tmp" ]]; then
+    local bbot_started="$(date +%s)"
+    info "bbot-cloud: started"
+    print_command bbot-cloud "${bbot_exec_cmd[@]}"
+    if run_logged "$base/logs/bbot-cloud.stdout.log" "$base/logs/bbot-cloud.stderr.log" "${bbot_exec_cmd[@]}" && [[ -d "$bbot_tmp" ]]; then
       if atomic_publish_dir "$bbot_tmp" "$bbot_out"; then
         rm -rf "$bbot_tmp"
         bbot_ok=1
+        info "bbot-cloud: completed duration=$(( $(date +%s) - bbot_started ))s"
       else
         rm -rf "$bbot_tmp"
         warn "BBOT output publication failed; previous artifact preserved"
@@ -546,6 +635,7 @@ run_cloud() {
     else
       rm -rf "$bbot_tmp"
       warn "BBOT cloud discovery failed; see $base/logs/bbot-cloud.stderr.log"
+      show_log_excerpt "$base/logs/bbot-cloud.stderr.log"
     fi
     redact_log_file "$base/logs/bbot-cloud.stdout.log"
     redact_log_file "$base/logs/bbot-cloud.stderr.log"
@@ -571,6 +661,7 @@ summary = {"domain": domain, "kaeferjaeger_associations": kaefer, "bbot_events":
 PY
   if [[ "$origin_ok" -eq 1 && "$bbot_ok" -eq 1 ]]; then
     date -u +%FT%TZ > "$cloud/complete.marker"
+    info "cloud: completed summary=$cloud/summary.json"
   else
     warn "cloud discovery incomplete; resume will retry missing components"
   fi
@@ -581,6 +672,12 @@ run_domain() {
   local base="$OUTPUT_ROOT/$domain"
   local out="$base/outputs"
   local raw="$out/subdomains/raw"
+  printf '\n=== Quality Recon ===\n'
+  printf 'Target: %s\n' "$domain"
+  printf 'Profile: %s\n' "$PROFILE"
+  printf 'HTTP rate: %s requests/second per stage\n' "$RATE"
+  if [[ "$MAX_TIME_MIN" -eq 0 ]]; then printf 'Stage runtime: unlimited\n'; else printf 'Stage runtime: %s minutes\n' "$MAX_TIME_MIN"; fi
+  printf 'Output: %s\n\n' "$out"
   mkdir -p "$base/inputs" "$base/logs" "$raw" "$out/dns" "$out/http" "$out/urls/raw" "$out/urls/classified" "$out/crawl" "$out/ports" "$out/nuclei" "$out/osmedeus" "$out/karma" "$out/cloud/bbot" "$out/cloud/kaeferjaeger" "$out/compare"
   printf '%s\n' "$domain" > "$base/inputs/roots.txt"
   [[ "$RESUME" -eq 1 ]] || : > "$base/logs/commands.log"
@@ -617,7 +714,14 @@ run_domain() {
       : > "$raw/osmedeus.txt"
     elif have osmedeus; then
       rm -rf "$osm_target"
-      run_with_limit "${osm_cmd[@]}" >"$base/logs/osmedeus.stdout.log" 2>"$base/logs/osmedeus.stderr.log" || true
+      info "osmedeus: started"
+      print_command osmedeus "${osm_cmd[@]}"
+      if run_logged "$base/logs/osmedeus.stdout.log" "$base/logs/osmedeus.stderr.log" "${osm_cmd[@]}"; then
+        info "osmedeus: command completed"
+      else
+        warn "osmedeus: command failed; log=$base/logs/osmedeus.stderr.log"
+        show_log_excerpt "$base/logs/osmedeus.stderr.log"
+      fi
       redact_log_file "$base/logs/osmedeus.stdout.log"
       redact_log_file "$base/logs/osmedeus.stderr.log"
       local osm_file="$out/osmedeus/$domain/subdomain/subdomain-$domain.txt"
@@ -759,7 +863,28 @@ summary={
 'ports': count(out/'ports/naabu.txt'),
 'nuclei_findings': count(out/'nuclei/findings.jsonl')}
 (out/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
-print(json.dumps(summary))
+print(f"\n=== Recon summary for {summary['domain']} ===")
+print(f"Subdomains: {summary['subdomains']}")
+print(f"Resolved hosts: {summary['resolved']}")
+print(f"Responsive web URLs: {summary['web_urls']}")
+print(f"Collected URLs: {summary['urls']}")
+print(f"Crawled URLs: {summary['crawl_urls']}")
+print(f"Open ports: {summary['ports']}")
+print(f"Nuclei leads: {summary['nuclei_findings']}")
+raw = out/'subdomains'/'raw'
+sources=[]
+if raw.is_dir():
+    for path in sorted(raw.glob('*.txt')):
+        n=count(path)
+        if n:
+            sources.append((path.stem,n))
+if sources:
+    print("Subdomain sources:")
+    for name,n in sources:
+        print(f"  - {name}: {n}")
+print(f"Output: {out}")
+print(f"Logs: {b/'logs'}")
+print(f"Machine summary: {out/'summary.json'}")
 PY
 }
 
