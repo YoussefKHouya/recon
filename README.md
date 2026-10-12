@@ -66,6 +66,8 @@ Runtime requirements:
 - Python 3
 - `setsid` from util-linux
 
+The bundled `resolver.txt` is used automatically by PureDNS. Override it with `--resolvers FILE` when needed.
+
 Default external tools:
 
 - Subfinder
@@ -217,7 +219,7 @@ Commands are executed as arrays and are never passed through `eval`.
 
 These are per-tool controls, not one global aggregate limit. Assetfinder, Findomain, archive providers, and Osmedeus do not expose one uniform hard RPS control; their concurrency is kept low or Osmedeus uses its `gently` preset.
 
-An optional PureDNS resolver file can be supplied with:
+The bundled `resolver.txt` is used by default. Supply another PureDNS resolver file with:
 
 ```bash
 ./recon.sh --domain example.com --resolvers resolvers.txt

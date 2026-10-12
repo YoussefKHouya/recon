@@ -9,6 +9,8 @@ if (( BASH_VERSINFO[0] < 4 )); then
 fi
 
 VERSION="4.0.2"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_RESOLVERS_FILE="$SCRIPT_DIR/resolver.txt"
 OUTPUT_ROOT="${HOME}/Recon"
 DOMAIN=""
 LIST_FILE=""
@@ -127,7 +129,7 @@ OPTIONS
       --dns-rate N            DNS queries/sec where supported, 1-500 (default: 100)
       --port-rate N           Naabu packets/sec, 1-1000 (default: 100)
       --crawl-depth N         Katana depth, 1-3 (default: 2)
-      --resolvers FILE        Optional PureDNS resolver list
+      --resolvers FILE        PureDNS resolver list (default: ./resolver.txt)
       --deep                  Append ports and nuclei stages
       --dry-run               Create a plan without network execution
   -h, --help                  Show help
@@ -871,6 +873,7 @@ done
 
 [[ -n "$DOMAIN" || -n "$LIST_FILE" ]] || die "Use --domain or --list"
 [[ -z "$DOMAIN" || -z "$LIST_FILE" ]] || die "Use only one of --domain or --list"
+if [[ -z "$RESOLVERS_FILE" && -f "$DEFAULT_RESOLVERS_FILE" ]]; then RESOLVERS_FILE="$DEFAULT_RESOLVERS_FILE"; fi
 [[ "$RATE" =~ ^([1-9]|10)$ ]] || die "--rate must be 1 through 10"
 [[ "$DNS_RATE" =~ ^([1-9]|[1-9][0-9]|[1-4][0-9]{2}|500)$ ]] || die "--dns-rate must be 1 through 500"
 [[ "$PORT_RATE" =~ ^([1-9]|[1-9][0-9]|[1-9][0-9]{2}|1000)$ ]] || die "--port-rate must be 1 through 1000"
