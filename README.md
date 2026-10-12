@@ -1,52 +1,93 @@
-# Recon
+# Quality Recon
 
-A bounded, provenance-preserving reconnaissance pipeline for authorized bug-bounty and security testing.
+An ordered, modular reconnaissance pipeline for authorized bug-bounty, VDP, lab, and security-assessment work.
 
-`recon.sh` accepts one root domain or a newline-delimited domain list and writes reproducible artifacts under `~/Recon/<domain>/outputs/`. It keeps raw tool output, normalized results, stderr, and command provenance separate so findings can be traced back to their source.
+The pipeline preserves each tool's output separately, builds normalized canonical datasets, and measures overlap and unique contribution with ReconCompare plus a deterministic local report. Tools can be removed or reordered from one configuration section instead of rewriting the orchestration logic.
 
-## Features
+## Pipeline
 
-- `passive`, `standard`, and `deep` profiles
-- Single-domain and batch input
-- Explicit scope acknowledgement for active profiles
-- Unified HTTP rate control with a hard maximum of 10 requests per second per stage
-- Raw and normalized output retained per tool
-- Resume-safe and atomic artifact publication
-- Unlimited stage runtime by default; optional operator-defined deadline
-- Automatic BBOT and Kaeferjaeger cloud discovery in `standard` and `deep`
-- Optional OneForAll, Osmedeus, Karma, and ReconCompare integration
-- Narrow port discovery and targeted Nuclei validation in `deep`
-- Secret redaction from captured output and persistent logs
+The default dependency-aware order is:
+
+```text
+1. Subdomain enumeration
+   ├── Subfinder
+   ├── Assetfinder
+   ├── Findomain
+   ├── BBOT
+   └── Osmedeus
+
+2. Source comparison
+   ├── ReconCompare
+   └── Local overlap/unique-contribution report
+
+3. DNS resolution
+   ├── PureDNS
+   └── DNSX fallback
+
+4. Responsive HTTP services
+   └── HTTPX
+
+5. Stack and framework extraction
+   └── Parsed from validated HTTPX JSONL
+
+6. Historical URL collection
+   ├── GAU
+   ├── Waybackurls
+   └── Waymore
+
+7. Live crawling
+   └── Katana against responsive URLs
+
+8. URL and API analysis
+   ├── API endpoints
+   ├── JavaScript files
+   ├── Authentication routes
+   ├── Upload/download routes
+   ├── Administration routes
+   ├── OpenAPI/Swagger routes
+   └── Parameterized URLs
+
+9. Cloud enumeration
+   ├── BBOT cloud modules
+   └── Kaeferjaeger
+
+10. Optional depth
+    ├── Naabu
+    └── Nuclei
+```
+
+DNS and alive checks intentionally precede Katana. Historical collectors can query the root independently, but a live crawler needs responsive URLs.
 
 ## Requirements
 
-The script uses available tools and skips missing optional components. Install the tools needed for your selected profile.
-
-### Core
+Runtime requirements:
 
 - Bash 4+
 - Python 3
-- GNU `timeout` only when `--max-time` is used
+- `setsid` from util-linux
+
+Default external tools:
+
 - Subfinder
-- GAU
-
-### Standard
-
+- Assetfinder
+- Findomain
+- BBOT
+- Osmedeus
 - PureDNS or DNSX
 - HTTPX
+- GAU
+- Waybackurls
+- Waymore
 - Katana
-- BBOT
-- Kaeferjaeger checkout at `~/kaeferjaeger.gay`
+- ReconCompare
+- Kaeferjaeger, expected at `~/kaeferjaeger.gay` unless `KAEFERJAEGER_DIR` is set
 
-### Deep and optional modules
+Optional deep stages:
 
 - Naabu
 - Nuclei
-- OneForAll
-- Osmedeus
-- Waymore
-- ReconCompare
-- `karma-v2-safe`
+
+Missing complementary enumerators are recorded and skipped. Missing tools required by a selected DNS, alive, crawl, port, or Nuclei stage produce a failed/partial run instead of silent success.
 
 ## Installation
 
@@ -56,7 +97,7 @@ cd recon
 chmod +x recon.sh
 ```
 
-Optional system-wide installation:
+Optional user-local installation:
 
 ```bash
 install -m 0755 recon.sh "$HOME/.local/bin/quality-recon"
@@ -64,45 +105,37 @@ install -m 0755 recon.sh "$HOME/.local/bin/quality-recon"
 
 ## Usage
 
-Passive discovery:
+> **Authorization:** the default pipeline performs active DNS resolution, HTTP probing, crawling, and cloud checks. Run it only against assets you own or are explicitly authorized to assess. Use `--dry-run` to inspect the plan without network execution.
+
+Run the default ordered pipeline:
 
 ```bash
 ./recon.sh --domain example.com
 ```
 
-Standard profile with active scope confirmation:
-
-```bash
-./recon.sh \
-  --domain example.com \
-  --profile standard \
-  --ack-scope
-```
-
-Deep profile with the default 10-request-per-second ceiling:
-
-```bash
-./recon.sh \
-  --domain example.com \
-  --profile deep \
-  --ack-scope \
-  --rate 10
-```
-
 Process a domain list:
 
 ```bash
-./recon.sh \
-  --list domains.txt \
-  --profile standard \
-  --ack-scope \
-  --resume
+./recon.sh --list domains.txt
 ```
 
-Preview commands and output layout without executing network tools:
+Blank lines and lines beginning with `#` are ignored. Inline comments are supported:
+
+```text
+example.com
+example.org # customer environment
+```
+
+Preview commands and artifacts without executing network tools:
 
 ```bash
-./recon.sh --domain example.com --profile deep --ack-scope --dry-run
+./recon.sh --domain example.com --dry-run
+```
+
+Append bounded Naabu and Nuclei stages:
+
+```bash
+./recon.sh --domain example.com --deep
 ```
 
 Display every option:
@@ -111,120 +144,196 @@ Display every option:
 ./recon.sh --help
 ```
 
-## Profiles
+## Tool and stage control
 
-| Profile | Behavior |
-|---|---|
-| `passive` | Passive subdomain and archive collection only |
-| `standard` | Passive collection, DNS validation, HTTP inventory, crawling, BBOT, and Kaeferjaeger |
-| `deep` | Standard profile plus optional DNS brute force, narrow port discovery, and targeted Nuclei validation |
-
-`standard` and `deep` perform active requests and therefore require `--ack-scope`.
-
-## Rate limits
-
-`--rate N` controls HTTPX, Katana, BBOT, Nuclei, and active Karma stages. Accepted values are `1` through `10`; the default is `10`.
+The control lists are centralized near the top of `recon.sh`:
 
 ```bash
-./recon.sh \
-  --domain example.com \
-  --profile deep \
-  --ack-scope \
-  --rate 10 \
-  --crawl-rate 3
+STAGES_CSV="subdomains,compare,dns,alive,stack,archives,crawl,url-analysis,cloud"
+SUBDOMAIN_TOOLS_CSV="subfinder,assetfinder,findomain,bbot,osmedeus"
+ARCHIVE_TOOLS_CSV="gau,waybackurls,waymore"
+CLOUD_TOOLS_CSV="bbot-cloud,kaeferjaeger"
 ```
 
-The limit applies independently to each stage, not as a shared host-wide aggregate. Naabu uses the separate `--port-rate` packet limit.
+They can also be overridden per run.
 
-## Runtime
-
-Stages have no wall-clock deadline by default. Slow collectors such as Amass, BBOT, Karma, and Osmedeus may run until they complete.
-
-Set an explicit deadline only when you want one:
+Remove redundant subdomain tools:
 
 ```bash
-./recon.sh --domain example.com --profile deep --ack-scope --max-time 120
+./recon.sh --domain example.com \
+  --subdomain-tools subfinder,bbot,osmedeus
 ```
 
-`--max-time 0` means unlimited and is the default. Accepted bounded values are 1 through 1440 minutes. Per-request network timeouts remain enabled so one dead connection cannot stall a scanner forever.
-
-To watch the current run's logs from another terminal:
+Run only passive enumeration and comparison:
 
 ```bash
-tail -n 30 -F ~/Recon/example.com/logs/*.log
+./recon.sh --domain example.com \
+  --stages subdomains,compare \
+  --subdomain-tools subfinder,assetfinder,findomain,bbot
 ```
 
-The default terminal output reports:
-
-- target, profile, effective rate, runtime policy, and output path;
-- when each stage starts, completes, fails, or is skipped by `--resume`;
-- stage duration and number of emitted items;
-- a short stderr excerpt when a stage fails;
-- final totals for subdomains, resolved hosts, web services, URLs, ports, and Nuclei leads;
-- per-source subdomain counts and paths to the complete logs and machine-readable summary.
-
-Tool output is live by default, but progress bars, counters, spinners, and duplicate status lines are filtered from the terminal. The unfiltered output remains in the stage log files. Useful diagnostics from core tools are shown as they happen; Osmedeus, Karma, BBOT, Kaeferjaeger, and OneForAll stream meaningful normal output and errors. Every executed command is printed with a `[>]` prefix. Completed text-producing stages show the result count, result path, and up to five sample findings instead of dumping thousands of lines.
-
-For summary-only output:
+Run archive collection and URL classification only:
 
 ```bash
-./recon.sh --domain example.com --quiet
+./recon.sh --domain example.com \
+  --stages archives,url-analysis \
+  --archive-tools gau,waybackurls,waymore
 ```
 
-## Output
+Select the cloud collectors explicitly:
+
+```bash
+./recon.sh --domain example.com \
+  --stages cloud \
+  --cloud-tools bbot-cloud,kaeferjaeger
+```
+
+Unknown tools, unknown stages, duplicates, and invalid dependency ordering fail before target output is created.
+
+To add a new external tool:
+
+1. Add its name to the relevant control list.
+2. Add one Bash-array command builder.
+3. Add one dispatch entry to the relevant stage.
+
+Commands are executed as arrays and are never passed through `eval`.
+
+## Rate controls
+
+```bash
+./recon.sh --domain example.com \
+  --rate 5 \
+  --dns-rate 100 \
+  --port-rate 100 \
+  --crawl-depth 2
+```
+
+| Option | Purpose | Accepted range |
+|---|---|---:|
+| `--rate` | Per-tool HTTP request ceiling where supported | 1–10 |
+| `--dns-rate` | DNS query rate where supported | 1–500 |
+| `--port-rate` | Naabu packets per second | 1–1000 |
+| `--crawl-depth` | Katana crawl depth | 1–3 |
+
+These are per-tool controls, not one global aggregate limit. Assetfinder, Findomain, archive providers, and Osmedeus do not expose one uniform hard RPS control; their concurrency is kept low or Osmedeus uses its `gently` preset.
+
+An optional PureDNS resolver file can be supplied with:
+
+```bash
+./recon.sh --domain example.com --resolvers resolvers.txt
+```
+
+## ReconCompare and redundancy analysis
+
+Every selected subdomain enumerator writes separate evidence under:
+
+```text
+outputs/subdomains/raw/
+outputs/subdomains/scoped/
+```
+
+Raw output is retained for provenance. Scoped files are normalized and restricted to the target root before comparison and merging.
+
+Comparison output:
+
+```text
+outputs/compare/report.json
+outputs/compare/report.txt
+outputs/compare/reconcompare.json
+outputs/compare/reconcompare.txt
+```
+
+The local report records:
+
+- total union size;
+- findings per tool;
+- unique contribution;
+- overlap with other tools;
+- redundancy percentage;
+- coverage percentage of the union;
+- pairwise containment.
+
+A tool producing zero unique results on one target is not removed automatically. Compare representative runs before deciding that it is redundant.
+
+## Output layout
+
+Each live execution gets an exclusive immutable run directory:
 
 ```text
 ~/Recon/<domain>/
-├── inputs/
-├── logs/
-│   ├── run.json
-│   ├── commands.log
-│   └── *.stderr.log
-└── outputs/
-    ├── subdomains/
-    │   ├── raw/
-    │   └── all.txt
-    ├── dns/
-    ├── http/
-    ├── urls/
-    ├── crawl/
-    ├── ports/
-    ├── nuclei/
-    ├── cloud/
-    ├── osmedeus/
-    ├── compare/
-    └── summary.json
+├── runs/
+│   └── <run-id>/
+│       ├── completed.json
+│       ├── logs/
+│       │   ├── commands.log
+│       │   ├── status.tsv
+│       │   └── *.stdout.log / *.stderr.log
+│       └── outputs/
+│           ├── subdomains/
+│           │   ├── raw/
+│           │   ├── scoped/
+│           │   └── all.txt
+│           ├── compare/
+│           ├── dns/
+│           ├── http/
+│           ├── stack/
+│           ├── urls/
+│           │   ├── raw/
+│           │   └── classified/
+│           ├── crawl/
+│           ├── cloud/
+│           ├── ports/
+│           ├── nuclei/
+│           ├── summary.json
+│           └── summary.txt
+└── latest -> runs/<run-id>
 ```
 
-Raw source files remain separate from merged output. Cloud associations, bucket names, ASN ranges, third-party CNAMEs, and historical SNI matches are leads—not proof of ownership, authorization, or vulnerability.
-
-## OneForAll
-
-Set `ONEFORALL_HOME` when OneForAll is not installed at `~/tools/OneForAll`:
-
-```bash
-ONEFORALL_HOME=/opt/OneForAll \
-  ./recon.sh --domain example.com --oneforall --ack-scope
-```
-
-The script enforces passive OneForAll flags:
+Dry runs are written to:
 
 ```text
---brute False --dns False --req False --takeover False
+~/Recon/<domain>/dry-run/
 ```
 
-## Safety
+A dry run never replaces `latest`.
 
-Use this project only on assets you own or are explicitly authorized to test.
+## Failure behavior
 
-The script intentionally does not:
+- One complementary tool failure does not stop independent tools.
+- Required stage failures produce a partial run and a nonzero exit.
+- PureDNS automatically falls back to DNSX when it fails or returns no resolved hosts.
+- Malformed HTTPX JSONL fails the parser contract and cannot feed crawling or stack analysis.
+- ReconCompare degradation does not destroy the deterministic local comparison report.
+- `SIGINT` and `SIGTERM` give the active process group a short graceful shutdown window, then force termination if required.
+- An interruption before atomic publication does not replace `latest`; a signal after publication leaves the already completed run intact.
+- Captured logs and published text artifacts are redacted against configured and environment-provided secret values before publication.
 
-- infer authorization from branding, DNS relationships, cloud associations, or historical data;
-- run SQLMap by default;
-- fuzz passwords or perform credential stuffing;
-- attempt broad 403 or rate-limit bypasses;
-- recursively fuzz POST requests;
-- scan every port by default;
-- treat scanner matches as confirmed vulnerabilities.
+Exit behavior:
 
-Review the applicable program policy before running active profiles.
+| Code | Meaning |
+|---:|---|
+| `0` | Selected pipeline completed without recorded failures |
+| `1` | Invalid configuration or preflight failure |
+| `2` | Partial run with one or more failed stages/tools |
+| `3` | No external reconnaissance tool completed successfully |
+| `130` | Interrupted with SIGINT |
+| `143` | Interrupted with SIGTERM |
+
+## Verification
+
+Run the synthetic suite without contacting real targets:
+
+```bash
+bash -n recon.sh
+bash -n tests/test_recon.sh
+bash tests/test_recon.sh
+git diff --check
+```
+
+The suite uses fake binaries and covers command construction, stage ordering, output normalization, ReconCompare inputs, DNS fallback, malformed HTTPX output, secret redaction, failed tools, dry-run isolation, and process interruption.
+
+## Responsible use
+
+Use this project only on assets you own or are authorized to assess. The pipeline preserves evidence and applies bounded defaults, but it does not infer authorization or program policy.
+
+Scanner output, public metadata, technology fingerprints, cloud candidates, and URL classifications are investigative leads—not confirmed vulnerabilities.
