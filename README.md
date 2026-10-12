@@ -66,7 +66,7 @@ Runtime requirements:
 - Python 3
 - `setsid` from util-linux
 
-The bundled `resolver.txt` is used automatically by PureDNS. Override it with `--resolvers FILE` when needed.
+The bundled `resolver.txt` is a snapshot of the MassDNS public resolver list and is used automatically by PureDNS. Override it with `--resolvers FILE` when needed.
 
 Default external tools:
 
